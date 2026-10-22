@@ -3,6 +3,7 @@
 #include "game_scene.hpp"
 #include "parsers_declarations.hpp"
 #include "headless_run.hpp"
+#include "headless_bot.hpp"
 #include <oneapi/tbb/global_control.h>
 #include <memory>
 
@@ -220,12 +221,23 @@ int main(int argc, char* argv[]) {
 	int twin_threads = 1;
 	int check_every = 1;
 	bool mp_paths = false;
+	// -load_save NAME: start from a save in the saves folder (NAME without .bin), e.g. a CKPT_<year> checkpoint
+	// -checkpoint_every N: with -headless -years, write a CKPT_<year> save every N game years
+	std::string load_save;
+	int checkpoint_every = 0;
+	int roundtrip_every = 0; // -roundtrip_every N: with -twin, save A and load it into B every N days (see headless::run_twin)
 	for(int i = 1; i < argc; ++i) {
 		if(std::string(argv[i]) == "-mp")
 			mp_paths = true;
 	}
 	for(int i = 1; i + 1 < argc; ++i) {
-		if(std::string(argv[i]) == "-twin")
+		if(std::string(argv[i]) == "-load_save")
+			load_save = std::string(argv[i + 1]) + ".bin";
+		else if(std::string(argv[i]) == "-checkpoint_every")
+			checkpoint_every = std::atoi(argv[i + 1]);
+		else if(std::string(argv[i]) == "-roundtrip_every")
+			roundtrip_every = std::atoi(argv[i + 1]);
+		else if(std::string(argv[i]) == "-twin")
 			twin_dir = argv[i + 1];
 		else if(std::string(argv[i]) == "-twin_threads")
 			twin_threads = std::atoi(argv[i + 1]);
@@ -394,6 +406,13 @@ int main(int argc, char* argv[]) {
 	} else {
 		window::emit_error_message("Scenario file could not be read.", true);
 	}
+	if(!load_save.empty()) {
+		game_state.clear_unsaved_data(); // same order as the in-game load (command::execute_load_game)
+		if(!sys::try_read_save_file(game_state, NATIVE(load_save)))
+			window::emit_error_message("Save file could not be read: " + load_save + "\n", true);
+		game_state.fill_unsaved_data();
+		window::emit_error_message("Loaded save " + load_save + "\n", false);
+	}
 
 	network::init(game_state);
 
@@ -413,6 +432,12 @@ int main(int argc, char* argv[]) {
 			else if(std::string(argv[i]) == "-run_secs")
 				run_secs = std::atoi(argv[i + 1]);
 		}
+		// -bot: the client plays its nation through real networked commands (see headless_bot.hpp)
+		bool use_bot = false;
+		for(int i = 1; i < argc; ++i)
+			if(std::string(argv[i]) == "-bot")
+				use_bot = true;
+		headless_bot::bot bot;
 		bool is_host = game_state.network_mode == sys::network_mode_type::host;
 		window::emit_error_message(is_host ? "Starting headless MP host.\n" : "Starting headless MP client.\n", false);
 		game_state.ui_pause.store(false, std::memory_order::release);
@@ -426,9 +451,9 @@ int main(int argc, char* argv[]) {
 			while(!game_state.quit_signaled.load(std::memory_order::acquire)) {
 				std::this_thread::sleep_for(std::chrono::seconds(1));
 				double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-				printf("HB %s t=%.0f day=%d speed=%d in_progress=%d oos=%d\n", is_host ? "host" : "client", secs,
+				printf("HB %s t=%.0f day=%d speed=%d in_progress=%d oos=%d orders=%d\n", is_host ? "host" : "client", secs,
 						int(game_state.current_date.value), int(game_state.actual_game_speed.load()),
-						int(game_state.current_scene.game_in_progress), int(game_state.network_state.out_of_sync));
+						int(game_state.current_scene.game_in_progress), int(game_state.network_state.out_of_sync), bot.orders_sent);
 				fflush(stdout);
 				// a hot-join leaves the host paused (its queued pause command lands after the unpause), so press play
 				// again the way a human host would once nobody is loading
@@ -438,7 +463,16 @@ int main(int argc, char* argv[]) {
 					game_state.quit_signaled.store(true, std::memory_order::release);
 			}
 		});
-		game_state.game_loop();
+		if(!is_host && use_bot) {
+			// same as state::game_loop for a client, plus the bot's daily orders on this (the game) thread
+			while(!game_state.quit_signaled.load(std::memory_order::acquire)) {
+				network::send_and_receive_commands(game_state);
+				bot.step(game_state);
+				std::this_thread::sleep_for(std::chrono::milliseconds(15));
+			}
+		} else {
+			game_state.game_loop();
+		}
 		heartbeat.join();
 		std::_Exit(EXIT_SUCCESS); // skip a graceful network shutdown; the other side may already be gone
 	}
@@ -458,6 +492,12 @@ int main(int argc, char* argv[]) {
 				window::emit_error_message("Twin: scenario file could not be read.", true);
 			}
 			twin->fill_unsaved_data();
+			if(!load_save.empty()) {
+				twin->clear_unsaved_data();
+				if(!sys::try_read_save_file(*twin, NATIVE(load_save)))
+					window::emit_error_message("Twin: save file could not be read.", true);
+				twin->fill_unsaved_data();
+			}
 			network::init(*twin); // mirrors the startup the main copy went through (creates the local player record)
 			twin->load_user_settings();
 			ui::populate_definitions_map(*twin);
@@ -474,11 +514,11 @@ int main(int argc, char* argv[]) {
 				game_state.network_mode = sys::network_mode_type::host;
 				twin->network_mode = sys::network_mode_type::host;
 			}
-			int split = headless::run_twin(game_state, *twin, run_years >= 0 ? run_years : 100, twin_threads, check_every, twin_dir);
+			int split = headless::run_twin(game_state, *twin, run_years >= 0 ? run_years : 100, twin_threads, check_every, twin_dir, roundtrip_every);
 			return split < 0 ? EXIT_SUCCESS : 3;
 		}
 		if(run_years >= 0) {
-			headless::run(game_state, run_years, dump_dir);
+			headless::run(game_state, run_years, dump_dir, checkpoint_every);
 			return EXIT_SUCCESS;
 		}
 		game_state.game_loop();

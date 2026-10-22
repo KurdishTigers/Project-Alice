@@ -57,7 +57,8 @@ inline void dump_month(sys::state& state, FILE* nations_csv, FILE* prices_csv, F
 	});
 }
 
-inline void run(sys::state& state, int years, std::string const& dump_dir) {
+// checkpoint_every > 0: also writes a save named CKPT_<year> every that many years (for starting twin runs late in the game)
+inline void run(sys::state& state, int years, std::string const& dump_dir, int checkpoint_every = 0) {
 	using clock = std::chrono::steady_clock;
 	FILE* nations_csv = nullptr;
 	FILE* prices_csv = nullptr;
@@ -100,6 +101,12 @@ inline void run(sys::state& state, int years, std::string const& dump_dir) {
 			fflush(stdout);
 			t_year = now;
 			year = ymd.year;
+			if(checkpoint_every > 0 && (year - start.year) % checkpoint_every == 0) {
+				auto name = "CKPT_" + std::to_string(year);
+				sys::write_save_file(state, sys::save_type::normal, name, name);
+				printf("CHECKPOINT %s\n", name.c_str());
+				fflush(stdout);
+			}
 		}
 		if(ymd.year >= end_year)
 			break;
@@ -118,7 +125,11 @@ inline void run(sys::state& state, int years, std::string const& dump_dir) {
 // threads, so it behaves like a client on a PC with a different core count. On the first mismatch it writes
 // a field-by-field OOS report plus a save of each copy to `out_dir`, then stops.
 // Returns the number of days simulated before the split, or -1 if both copies stayed identical.
-inline int run_twin(sys::state& a, sys::state& b, int years, int b_threads, int check_every, std::string const& out_dir) {
+// roundtrip_every > 0: every that many days, copy A is saved to memory and loaded into copy B the same way a client
+// loads the host's save when it joins or resyncs (clear unsaved data, read save, fill unsaved data), and the two are
+// compared straight away. A mismatch there means some synced state does not survive a save/load, which breaks
+// hot-joining and makes resyncs fail.
+inline int run_twin(sys::state& a, sys::state& b, int years, int b_threads, int check_every, std::string const& out_dir, int roundtrip_every = 0) {
 	using clock = std::chrono::steady_clock;
 	std::filesystem::create_directories(out_dir);
 	a.user_settings.autosaves = sys::autosave_frequency::none;
@@ -152,7 +163,24 @@ inline int run_twin(sys::state& a, sys::state& b, int years, int b_threads, int 
 		return false;
 	};
 
+	auto roundtrip = [&](int day) {
+		auto length = sys::sizeof_save_section(a);
+		auto buffer = std::unique_ptr<uint8_t[]>(new uint8_t[length]);
+		sys::write_save_section(buffer.get(), a);
+		b.clear_unsaved_data();
+		sys::read_save_section(buffer.get(), buffer.get() + length, b);
+		b.fill_unsaved_data();
+		if(!compare(day)) {
+			printf("ROUNDTRIP_SPLIT day=%d (state did not survive save + load)\n", day);
+			fflush(stdout);
+			return false;
+		}
+		return true;
+	};
+
 	if(!compare(0))
+		return 0;
+	if(roundtrip_every > 0 && !roundtrip(0))
 		return 0;
 
 	auto t_start = clock::now();
@@ -163,6 +191,8 @@ inline int run_twin(sys::state& a, sys::state& b, int years, int b_threads, int 
 		arena_b.execute([&]() { b.single_game_tick(); });
 		++day;
 		if(day % check_every == 0 && !compare(day))
+			return day;
+		if(roundtrip_every > 0 && day % roundtrip_every == 0 && !roundtrip(day))
 			return day;
 		auto ymd = a.current_date.to_ymd(a.start_date);
 		if(ymd.year != year) {
