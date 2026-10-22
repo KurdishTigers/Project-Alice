@@ -213,8 +213,25 @@ int main(int argc, char* argv[]) {
 	std::optional<uint32_t> seed;
 	std::string dump_dir;
 	std::unique_ptr<oneapi::tbb::global_control> thread_cap;
+	// -twin DIR: run two copies side by side and stop at the first desync (see headless::run_twin)
+	// -twin_threads N: worker threads for the second copy; -check_every N: days between checksum compares
+	// -mp: run the simulation with multiplayer code paths (network_mode = host) instead of single player ones
+	std::string twin_dir;
+	int twin_threads = 1;
+	int check_every = 1;
+	bool mp_paths = false;
+	for(int i = 1; i < argc; ++i) {
+		if(std::string(argv[i]) == "-mp")
+			mp_paths = true;
+	}
 	for(int i = 1; i + 1 < argc; ++i) {
-		if(std::string(argv[i]) == "-seed")
+		if(std::string(argv[i]) == "-twin")
+			twin_dir = argv[i + 1];
+		else if(std::string(argv[i]) == "-twin_threads")
+			twin_threads = std::atoi(argv[i + 1]);
+		else if(std::string(argv[i]) == "-check_every")
+			check_every = std::max(1, std::atoi(argv[i + 1]));
+		else if(std::string(argv[i]) == "-seed")
 			seed = uint32_t(std::strtoul(argv[i + 1], nullptr, 10));
 		else if(std::string(argv[i]) == "-years")
 			run_years = std::atoi(argv[i + 1]);
@@ -383,6 +400,49 @@ int main(int argc, char* argv[]) {
 	game_state.load_user_settings();
 	ui::populate_definitions_map(game_state);
 
+	if(headless && game_state.network_mode != sys::network_mode_type::single_player) {
+		// Headless multiplayer test mode (-headless with -host or -join): a real host and a real client over the network,
+		// with no window. Players keep their nations but give no orders. The host starts the game at once and clients
+		// hot-join. Prints a heartbeat line every second so host and client progress can be compared.
+		// -speed N: game speed (5 = as fast as possible). -run_secs N: quit after N seconds.
+		int mp_speed = 4;
+		int run_secs = 60;
+		for(int i = 1; i + 1 < argc; ++i) {
+			if(std::string(argv[i]) == "-speed")
+				mp_speed = std::atoi(argv[i + 1]);
+			else if(std::string(argv[i]) == "-run_secs")
+				run_secs = std::atoi(argv[i + 1]);
+		}
+		bool is_host = game_state.network_mode == sys::network_mode_type::host;
+		window::emit_error_message(is_host ? "Starting headless MP host.\n" : "Starting headless MP client.\n", false);
+		game_state.ui_pause.store(false, std::memory_order::release);
+		if(is_host) {
+			game_state.actual_game_speed = mp_speed;
+			game_scene::switch_scene(game_state, game_scene::scene_id::in_game_basic);
+			command::notify_start_game(game_state);
+		}
+		auto t0 = std::chrono::steady_clock::now();
+		std::thread heartbeat([&]() {
+			while(!game_state.quit_signaled.load(std::memory_order::acquire)) {
+				std::this_thread::sleep_for(std::chrono::seconds(1));
+				double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+				printf("HB %s t=%.0f day=%d speed=%d in_progress=%d oos=%d\n", is_host ? "host" : "client", secs,
+						int(game_state.current_date.value), int(game_state.actual_game_speed.load()),
+						int(game_state.current_scene.game_in_progress), int(game_state.network_state.out_of_sync));
+				fflush(stdout);
+				// a hot-join leaves the host paused (its queued pause command lands after the unpause), so press play
+				// again the way a human host would once nobody is loading
+				if(is_host && game_state.actual_game_speed.load() == 0 && !game_state.network_state.any_client_loading_flag.load())
+					game_state.actual_game_speed = mp_speed;
+				if(secs >= run_secs)
+					game_state.quit_signaled.store(true, std::memory_order::release);
+			}
+		});
+		game_state.game_loop();
+		heartbeat.join();
+		std::_Exit(EXIT_SUCCESS); // skip a graceful network shutdown; the other side may already be gone
+	}
+
 	if(headless) {
 		window::emit_error_message("Starting in headless mode.\n", false);
 		game_state.actual_game_speed = headless_speed;
@@ -392,6 +452,31 @@ int main(int argc, char* argv[]) {
 		// headless: network::init gave the rank-1 nation to a local player; nobody plays it, so hand it back to the AI
 		for(auto n : game_state.world.in_nation)
 			n.set_is_player_controlled(false);
+		if(!twin_dir.empty()) {
+			auto twin = std::make_unique<sys::state>();
+			if(!sys::try_read_scenario_and_save_file(*twin, selected_scenario_file, seed)) {
+				window::emit_error_message("Twin: scenario file could not be read.", true);
+			}
+			twin->fill_unsaved_data();
+			network::init(*twin); // mirrors the startup the main copy went through (creates the local player record)
+			twin->load_user_settings();
+			ui::populate_definitions_map(*twin);
+			twin->actual_game_speed = headless_speed;
+			twin->ui_pause.store(false, std::memory_order::release);
+			game_scene::switch_scene(*twin, game_scene::scene_id::in_game_basic);
+			twin->local_player_nation = dcon::nation_id{};
+			for(auto n : twin->world.in_nation)
+				n.set_is_player_controlled(false);
+			twin->game_seed = game_state.game_seed;
+			game_state.current_scene.game_in_progress = true;
+			twin->current_scene.game_in_progress = true;
+			if(mp_paths) {
+				game_state.network_mode = sys::network_mode_type::host;
+				twin->network_mode = sys::network_mode_type::host;
+			}
+			int split = headless::run_twin(game_state, *twin, run_years >= 0 ? run_years : 100, twin_threads, check_every, twin_dir);
+			return split < 0 ? EXIT_SUCCESS : 3;
+		}
 		if(run_years >= 0) {
 			headless::run(game_state, run_years, dump_dir);
 			return EXIT_SUCCESS;

@@ -12,8 +12,8 @@ else()
 
 		SOURCE_DIR ${CMAKE_CURRENT_BINARY_DIR}/luajit/source
 
-		GIT_REPOSITORY https://luajit.org/git/luajit.git
-		GIT_TAG origin/v2.1
+		GIT_REPOSITORY https://github.com/LuaJIT/LuaJIT.git
+		GIT_TAG v2.1
 		GIT_SHALLOW FALSE
 		GIT_PROGRESS TRUE
 

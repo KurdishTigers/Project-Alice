@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <string>
+#include <oneapi/tbb/task_arena.h>
 
 namespace headless {
 
@@ -110,6 +111,73 @@ inline void run(sys::state& state, int years, std::string const& dump_dir) {
 		fclose(prices_csv);
 		fclose(provinces_csv);
 	}
+}
+
+// -twin: runs two copies of the same game in one process, side by side, and compares the full multiplayer
+// checksum every `check_every` days. The second copy runs inside a task arena capped at `b_threads` worker
+// threads, so it behaves like a client on a PC with a different core count. On the first mismatch it writes
+// a field-by-field OOS report plus a save of each copy to `out_dir`, then stops.
+// Returns the number of days simulated before the split, or -1 if both copies stayed identical.
+inline int run_twin(sys::state& a, sys::state& b, int years, int b_threads, int check_every, std::string const& out_dir) {
+	using clock = std::chrono::steady_clock;
+	std::filesystem::create_directories(out_dir);
+	a.user_settings.autosaves = sys::autosave_frequency::none;
+	b.user_settings.autosaves = sys::autosave_frequency::none;
+
+	oneapi::tbb::task_arena arena_b(b_threads > 0 ? b_threads : oneapi::tbb::task_arena::automatic);
+
+	auto start = a.current_date.to_ymd(a.start_date);
+	int const end_year = start.year + years;
+	int year = start.year;
+	printf("TWIN start=%s years=%d seed=%u/%u b_threads=%d check_every=%d\n", ymd_str(start).c_str(), years, a.game_seed,
+			b.game_seed, b_threads, check_every);
+	fflush(stdout);
+
+	auto compare = [&](int day) {
+		auto ka = a.get_mp_state_checksum();
+		auto kb = b.get_mp_state_checksum();
+		if(ka.is_equal(kb))
+			return true;
+		auto date = ymd_of(a);
+		printf("SPLIT day=%d date=%s\n", day, date.c_str());
+		fflush(stdout);
+		std::string report = network::generate_full_oos_report(a, b);
+		FILE* f = fopen((out_dir + "/oos_report_" + date + ".txt").c_str(), "w");
+		if(f) {
+			fwrite(report.data(), 1, report.size(), f);
+			fclose(f);
+		}
+		sys::write_save_file(a, sys::save_type::normal, "TWIN_A_" + date, "TWIN_A_" + date);
+		sys::write_save_file(b, sys::save_type::normal, "TWIN_B_" + date, "TWIN_B_" + date);
+		return false;
+	};
+
+	if(!compare(0))
+		return 0;
+
+	auto t_start = clock::now();
+	auto t_year = t_start;
+	int day = 0;
+	while(true) {
+		a.single_game_tick();
+		arena_b.execute([&]() { b.single_game_tick(); });
+		++day;
+		if(day % check_every == 0 && !compare(day))
+			return day;
+		auto ymd = a.current_date.to_ymd(a.start_date);
+		if(ymd.year != year) {
+			auto now = clock::now();
+			printf("YEAR %d ok secs=%.1f wars=%u\n", year, std::chrono::duration<double>(now - t_year).count(), a.world.war_size());
+			fflush(stdout);
+			t_year = now;
+			year = ymd.year;
+		}
+		if(ymd.year >= end_year)
+			break;
+	}
+	printf("TWIN done, no split in %d days (%.0f secs)\n", day, std::chrono::duration<double>(clock::now() - t_start).count());
+	fflush(stdout);
+	return -1;
 }
 
 } // namespace headless
