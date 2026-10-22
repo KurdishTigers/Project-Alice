@@ -750,6 +750,8 @@ struct client_handshake_data {
 	sys::player_name nickname;
 	sys::player_password_raw player_password;
 	uint8_t lobby_password[16] = { 0 };
+	// Identifies the exact game build. Players on different builds desync, so the host refuses to let them join.
+	char build_id[48] = { 0 };
 };
 
 enum class client_state : uint8_t {

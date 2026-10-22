@@ -382,6 +382,14 @@ static void disconnect_client(sys::state& state, dcon::client_id client, bool ma
 		socket_add_to_send_queue(early_send_buffer, &hshake, sizeof(hshake));
 		break;
 	}
+	case disconnect_reason::version_mismatch:
+	{
+		// since this is during handshake, we send a handshake object back with the fail flag set
+		server_handshake_data hshake;
+		hshake.result = handshake_result::fail_version_mismatch;
+		socket_add_to_send_queue(early_send_buffer, &hshake, sizeof(hshake));
+		break;
+	}
 	case disconnect_reason::game_full:
 	{
 		// since this is during handshake, we send a handshake object back with the fail flag set
@@ -1093,9 +1101,36 @@ bool any_player_oos(sys::state& state) {
 	return false;
 }
 
+// A string that differs between builds that can desync with each other: compile date and time, platform, compiler
+// and vector instruction set. The release workflow builds one exe for everyone, so all players share one id.
+static void fill_build_id(char (&out)[48]) {
+	std::memset(out, 0, sizeof(out));
+#ifdef _WIN64
+	constexpr char const* platform = "win";
+#else
+	constexpr char const* platform = "nix";
+#endif
+#if defined(__clang__)
+	constexpr char const* compiler = "clang";
+#elif defined(_MSC_VER)
+	constexpr char const* compiler = "msvc";
+#else
+	constexpr char const* compiler = "gcc";
+#endif
+#if defined(__AVX512F__)
+	constexpr char const* isa = "avx512";
+#elif defined(__AVX2__)
+	constexpr char const* isa = "avx2";
+#else
+	constexpr char const* isa = "sse";
+#endif
+	snprintf(out, sizeof(out), "%s %s %s %s %s", __DATE__, __TIME__, platform, compiler, isa);
+}
+
 void client_send_handshake(sys::state& state) {
 	/* Send our client handshake back */
 	client_handshake_data hshake;
+	fill_build_id(hshake.build_id);
 	hshake.nickname = state.network_state.nickname;
 	hshake.player_password = state.network_state.player_password;
 	std::memcpy(hshake.lobby_password, state.network_state.lobby_password, sizeof(hshake.lobby_password));
@@ -1131,6 +1166,13 @@ int client_process_handshake(sys::state& state) {
 		case handshake_result::fail_game_ended:
 		{
 			auto discard = state.error_windows.try_push(ui::error_window{ text::produce_simple_string(state, "disconnected_message_header"), text::produce_simple_string(state, "disconnected_message_game_ended") });
+			finish(state, false);
+			break;
+		}
+		case handshake_result::fail_version_mismatch:
+		{
+			auto discard = state.error_windows.try_push(ui::error_window{ text::produce_simple_string(state, "disconnected_message_header"),
+				"The host is running a different build of the game. Everyone needs the exact same version to play together, otherwise the game goes out of sync." });
 			finish(state, false);
 			break;
 		}
@@ -1749,6 +1791,16 @@ int server_process_handshake(sys::state& state, dcon::client_id client) {
 		const auto now = std::chrono::system_clock::now();
 		state.console_log(format("{:%d-%m-%Y %H:%M:%OS}", now) + " host:recv:handshake | nickname: " + hshake_buffer.nickname.to_string());
 #endif
+		// Refuse players on a different game build: they would desync from the first day
+		{
+			char our_build[48];
+			fill_build_id(our_build);
+			if(std::memcmp(hshake_buffer.build_id, our_build, sizeof(our_build)) != 0) {
+				state.console_log("host:handshake | rejected client on a different build: " + std::string(hshake_buffer.build_id, strnlen(hshake_buffer.build_id, sizeof(hshake_buffer.build_id))));
+				disconnect_client(state, client, false, disconnect_reason::version_mismatch);
+				return;
+			}
+		}
 		// Check lobby password
 		if(std::memcmp(hshake_buffer.lobby_password, state.network_state.lobby_password, sizeof(state.network_state.lobby_password)) != 0) {
 			disconnect_client(state, client, false, disconnect_reason::incorrect_password);

@@ -22,7 +22,8 @@ enum class disconnect_reason : uint8_t {
 	game_has_ended = 6,
 	timed_out = 7,
 	network_error = 8,
-	game_full = 9
+	game_full = 9,
+	version_mismatch = 10
 };
 
 enum class handshake_result : uint8_t {
@@ -32,6 +33,7 @@ enum class handshake_result : uint8_t {
 	fail_on_banlist = 3,
 	fail_game_ended = 4,
 	fail_game_full = 5,
+	fail_version_mismatch = 6,
 };
 
 union selector_arg {
