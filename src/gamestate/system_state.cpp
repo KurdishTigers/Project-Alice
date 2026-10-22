@@ -5670,7 +5670,10 @@ void state::game_loop() {
 			} else {
 				auto entry_time = std::chrono::steady_clock::now();
 				auto ms_count = std::chrono::duration_cast<std::chrono::milliseconds>(entry_time - last_update).count();
-				if(speed >= 5 || ms_count >= game_speed[speed]) { /*enough time has passed*/
+				if(network_mode == sys::network_mode_type::host && network::host_should_wait_for_clients(*this)) {
+					// a player is more than alice_max_days_ahead days behind: hold this day until they catch up
+					std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				} else if(speed >= 5 || ms_count >= game_speed[speed]) { /*enough time has passed*/
 					last_update = entry_time;
 					if(network_mode == sys::network_mode_type::host) {
 						command::advance_tick(*this, local_player_nation);

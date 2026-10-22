@@ -58,6 +58,11 @@ struct host_settings_s {
 	float alice_place_ai_upon_disconnection = 1.0f;
 	float alice_lagging_behind_days_to_slow_down = 30.f;
 	float alice_lagging_behind_days_to_drop = 90.f;
+	// Lockstep pacing: the host will not run more than this many days ahead of the slowest connected player.
+	// 0 turns the wait off (old behavior: the host runs freely and only slows down after alice_lagging_behind_days_to_slow_down).
+	float alice_max_days_ahead = 3.f;
+	// If a player stops responding, the host waits at most this many real seconds before carrying on without them.
+	float alice_max_wait_seconds = 20.f;
 	uint16_t alice_host_port = 1984;
 	oos_check_interval oos_interval = oos_check_interval::monthly;
 	bool oos_debug_mode = false; // enables sending of gamestate from client to host when an OOS happens, so the host can generate a OOS report. Is NOT safe to enable unless you trust clients

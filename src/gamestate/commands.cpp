@@ -6135,8 +6135,9 @@ void execute_advance_tick(sys::state& state, dcon::nation_id source, sys::checks
 				}
 			}
 		}
-		// Notify server that we're still here
-		if(state.current_date.value % 7 == 0) {
+		// Tell the host which day we have finished. The host uses this to pace itself so it never runs more than
+		// host_settings.alice_max_days_ahead days ahead of us (it used to be every 7 days, which let clients drift weeks behind).
+		if(state.host_settings.alice_max_days_ahead > 0.f || state.current_date.value % 7 == 0) {
 			network_inactivity_ping(state, state.local_player_nation, state.current_date);
 		}
 		state.actual_game_speed = speed;

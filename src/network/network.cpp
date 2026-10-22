@@ -2093,6 +2093,44 @@ bool should_do_oos_check(const sys::state& state) {
 	}
 }
 
+bool host_should_wait_for_clients(sys::state& state) {
+	static std::chrono::steady_clock::time_point wait_started{};
+	static bool waiting = false;
+
+	if(state.network_mode != sys::network_mode_type::host || state.host_settings.alice_max_days_ahead <= 0.f || !state.current_scene.game_in_progress) {
+		waiting = false;
+		return false;
+	}
+	int32_t max_lead = int32_t(state.host_settings.alice_max_days_ahead);
+	bool someone_behind = false;
+	for(auto client : state.world.in_client) {
+		if(!client.is_valid() || is_scheduled_shutdown(state, client) || !can_send_data(state, client))
+			continue;
+		auto player = client.get_mp_player_from_player_client();
+		if(!player || !player.get_fully_loaded() || player.get_is_oos())
+			continue; // loading or resyncing players are handled by the reload logic, not by pacing
+		if(state.current_date.value - client.get_last_seen().value > max_lead) {
+			someone_behind = true;
+			break;
+		}
+	}
+	if(!someone_behind) {
+		waiting = false;
+		return false;
+	}
+	auto now = std::chrono::steady_clock::now();
+	if(!waiting) {
+		waiting = true;
+		wait_started = now;
+	}
+	// Safety valve: a player who has frozen or lost connection must not stall everyone forever.
+	// After the timeout the host carries on, and the existing slow-down / drop rules take over.
+	if(std::chrono::duration<float>(now - wait_started).count() > state.host_settings.alice_max_wait_seconds) {
+		return false;
+	}
+	return true;
+}
+
 bool should_do_clients_to_far_behind_check(const sys::state& state) {
 	// check once per month
 	return state.current_date.to_ymd(state.start_date).day == 1;
@@ -2455,6 +2493,9 @@ state.host_settings.y = data[x]
 
 		HS_LOAD("alice_expose_webui", alice_expose_webui);
 		HS_LOAD("alice_lagging_behind_days_to_drop", alice_lagging_behind_days_to_drop);
+		HS_LOAD("alice_lagging_behind_days_to_slow_down", alice_lagging_behind_days_to_slow_down);
+		HS_LOAD("alice_max_days_ahead", alice_max_days_ahead);
+		HS_LOAD("alice_max_wait_seconds", alice_max_wait_seconds);
 		HS_LOAD("alice_persistent_server_mode", alice_persistent_server_mode);
 		HS_LOAD("alice_place_ai_upon_disconnection", alice_place_ai_upon_disconnection);
 		HS_LOAD("alice_persistent_server_pause", alice_persistent_server_pause);
@@ -2483,6 +2524,9 @@ data[x] = state.host_settings.y
 
 		HS_SAVE("alice_expose_webui", alice_expose_webui);
 		HS_SAVE("alice_lagging_behind_days_to_drop", alice_lagging_behind_days_to_drop);
+		HS_SAVE("alice_lagging_behind_days_to_slow_down", alice_lagging_behind_days_to_slow_down);
+		HS_SAVE("alice_max_days_ahead", alice_max_days_ahead);
+		HS_SAVE("alice_max_wait_seconds", alice_max_wait_seconds);
 		HS_SAVE("alice_persistent_server_mode", alice_persistent_server_mode);
 		HS_SAVE("alice_place_ai_upon_disconnection", alice_place_ai_upon_disconnection);
 		HS_SAVE("alice_persistent_server_pause", alice_persistent_server_pause);

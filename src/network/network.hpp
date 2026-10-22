@@ -176,6 +176,8 @@ bool is_flushing(const sys::state& state, dcon::client_id client);
 void reload_save_locally(sys::state& state);
 bool should_do_oos_check(const sys::state& state);
 bool should_do_clients_to_far_behind_check(const sys::state& state);
+// Host only: true when the host should hold off on the next day because a connected player is too far behind.
+bool host_should_wait_for_clients(sys::state& state);
 std::string get_last_error_msg();
 void init(sys::state& state);
 void send_and_receive_commands(sys::state& state);
