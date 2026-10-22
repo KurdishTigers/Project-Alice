@@ -1,0 +1,58 @@
+name: Windows release build (vanilla MP fork)
+
+# Builds the multiplayer (SSE) Windows exe plus the launcher and keeps them as a downloadable
+# artifact. Everyone in a multiplayer game must use the exact same exe, so the same binary is
+# saved under all three names the launcher looks for (Alice.exe, AliceSSE.exe, Alice512.exe).
+# That way single player and multiplayer run the same build on every CPU.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ vanilla-mp-fixes ]
+
+jobs:
+  windows-release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up the MSVC environment (needed by the clang-cl toolchain)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure (clang-cl, SSE, release)
+        run: cmake --preset=x64-release-win-clang-sse -G Ninja
+
+      - name: Build
+        run: cmake --build out/build/x64-release-win-clang-sse --parallel --target Alice launch_alice
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $build = "out/build/x64-release-win-clang-sse"
+          $pkg = "package"
+          New-Item -ItemType Directory -Force $pkg | Out-Null
+          $alice = Get-ChildItem $build -Recurse -Filter Alice.exe | Select-Object -First 1
+          $launcher = Get-ChildItem $build -Recurse -Filter launch_alice.exe | Select-Object -First 1
+          if (-not $alice -or -not $launcher) { throw "Build outputs not found" }
+          foreach ($name in @("Alice.exe", "AliceSSE.exe", "Alice512.exe")) { Copy-Item $alice.FullName "$pkg/$name" }
+          Copy-Item $launcher.FullName "$pkg/launch_alice.exe"
+          Copy-Item libs/*.dll $pkg
+          Get-ChildItem $alice.DirectoryName -Filter *.dll | Copy-Item -Destination $pkg
+          Copy-Item -Recurse assets "$pkg/assets"
+          @"
+          Install: copy everything in this folder into your Victoria 2 folder (next to v2game.exe),
+          then start launch_alice.exe. Everyone in a multiplayer game needs this same build.
+
+          Multiplayer pacing (host only), in %LOCALAPPDATA%\Project Alice\host_settings.json:
+            alice_max_days_ahead   - host never runs more than this many days ahead of the slowest player (default 3, 0 = off)
+            alice_max_wait_seconds - how long the host waits for a frozen player before carrying on (default 20)
+          "@ | Out-File -Encoding utf8 "$pkg/README_FORK.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: alice-vanilla-mp-windows
+          path: package
