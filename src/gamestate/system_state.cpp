@@ -4275,6 +4275,37 @@ void state::on_scenario_load() {
 
 	ui_state.rebel_flags.resize(world.ideology_size(), 0);
 
+	// Lua init. This must run in every mode: UI windows use Lua elements (lua_scripted_element needs the state
+	// pointer) and gamerule changes call Lua functions. It used to sit inside the LLVM block below, after the
+	// multiplayer early return, so hosts and clients crashed on the first Lua UI element (the budget window).
+	// Save lua ui environment for later when UI is available
+
+	lua_alice_api::set_state(this);
+	lua_alice_api::setup_gameloop_environment(*this);
+
+
+
+	// populate the table with scripted functions from lua_combined_script (read during scenario generation). Do ui script later when UI is available
+	{
+		int status;
+		status = luaL_dostring(lua_game_loop_environment, lua_combined_script.c_str());
+		if(status) {
+#ifdef _WIN32
+			OutputDebugStringA(lua_tostring(lua_game_loop_environment, -1));
+#endif
+			lua_settop(lua_game_loop_environment, 0);
+			std::abort();
+		}
+		status = luaL_dostring(lua_game_loop_environment, lua_game_loop_script.c_str());
+		if(status) {
+#ifdef _WIN32
+			OutputDebugStringA(lua_tostring(lua_game_loop_environment, -1));
+#endif
+			lua_settop(lua_game_loop_environment, 0);
+			std::abort();
+		}
+	}
+
 	if(network_mode != network_mode_type::single_player)
 		return;
 
@@ -4571,33 +4602,6 @@ void state::on_scenario_load() {
 
 	dispatch.detach();
 
-	// Lua init. Save lua ui environment for later when UI is available
-
-	lua_alice_api::set_state(this);
-	lua_alice_api::setup_gameloop_environment(*this);
-
-
-
-	// populate the table with scripted functions from lua_combined_script (read during scenario generation). Do ui script later when UI is available
-	{
-		int status;
-		status = luaL_dostring(lua_game_loop_environment, lua_combined_script.c_str());
-		if(status) {
-#ifdef _WIN32
-			OutputDebugStringA(lua_tostring(lua_game_loop_environment, -1));
-#endif
-			lua_settop(lua_game_loop_environment, 0);
-			std::abort();
-		}
-		status = luaL_dostring(lua_game_loop_environment, lua_game_loop_script.c_str());
-		if(status) {
-#ifdef _WIN32
-			OutputDebugStringA(lua_tostring(lua_game_loop_environment, -1));
-#endif
-			lua_settop(lua_game_loop_environment, 0);
-			std::abort();
-		}
-	}
 
 
 #endif
