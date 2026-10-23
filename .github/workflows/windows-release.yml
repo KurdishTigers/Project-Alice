@@ -4,6 +4,9 @@ name: Windows release build (vanilla MP fork)
 # artifact. Everyone in a multiplayer game must use the exact same exe, so the same binary is
 # saved under all three names the launcher looks for (Alice.exe, AliceSSE.exe, Alice512.exe).
 # That way single player and multiplayer run the same build on every CPU.
+#
+# Two compilers are tried side by side: clang-cl (upgraded to the newest LLVM, closest to what the
+# upstream developers use) and MSVC (what upstream CI builds with). Use one zip for everyone.
 
 on:
   workflow_dispatch:
@@ -12,30 +15,44 @@ on:
 
 jobs:
   windows-release:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: clang
+            preset: x64-release-win-clang-sse
+          - compiler: msvc
+            preset: x64-release-windows-sse
     runs-on: windows-latest
+    name: Windows release (${{ matrix.compiler }})
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Set up the MSVC environment (needed by the clang-cl toolchain)
+      - name: Upgrade LLVM to the newest release (clang only)
+        if: matrix.compiler == 'clang'
+        shell: pwsh
+        run: choco upgrade llvm -y --no-progress
+
+      - name: Set up the MSVC environment
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
 
-      - name: Configure (clang-cl, SSE, release)
+      - name: Configure
         shell: bash
         run: |
-          echo "::notice::$(clang-cl --version | head -1)"
-          cmake --preset=x64-release-win-clang-sse -G Ninja
+          if [ "${{ matrix.compiler }}" = "clang" ]; then echo "::notice::$(clang-cl --version | head -1)"; else echo "::notice::$(cl 2>&1 | head -1)"; fi
+          cmake --preset=${{ matrix.preset }} -G Ninja
 
       - name: Build
         shell: bash
         run: |
           set -o pipefail
-          if ! cmake --build out/build/x64-release-win-clang-sse --parallel --target Alice launch_alice 2>&1 | tee build.log; then
-            # surface the first compiler errors as annotations (readable through the API without downloading the log)
-            grep -E "error|FAILED" build.log | grep -v "^\s*$" | head -10 | while IFS= read -r line; do
+          if ! cmake --build out/build/${{ matrix.preset }} --parallel --target Alice launch_alice 2>&1 | tee build.log; then
+            # surface the first real compiler errors as annotations (readable through the API without downloading the log)
+            grep -E "(: error|: fatal error|error C[0-9]+|error LNK[0-9]+|FAILED:)" build.log | head -10 | while IFS= read -r line; do
               echo "::error::${line:0:900}"
             done
             exit 1
@@ -44,7 +61,7 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
-          $build = "out/build/x64-release-win-clang-sse"
+          $build = "out/build/${{ matrix.preset }}"
           $pkg = "package"
           New-Item -ItemType Directory -Force $pkg | Out-Null
           $alice = Get-ChildItem $build -Recurse -Filter Alice.exe | Select-Object -First 1
@@ -56,6 +73,7 @@ jobs:
           Get-ChildItem $alice.DirectoryName -Filter *.dll | Copy-Item -Destination $pkg
           Copy-Item -Recurse assets "$pkg/assets"
           @"
+          Built with: ${{ matrix.compiler }}
           Install: copy everything in this folder into your Victoria 2 folder (next to v2game.exe),
           then start launch_alice.exe. Everyone in a multiplayer game needs this same build.
 
@@ -63,8 +81,9 @@ jobs:
             alice_max_days_ahead   - host never runs more than this many days ahead of the slowest player (default 3, 0 = off)
             alice_max_wait_seconds - how long the host waits for a frozen player before carrying on (default 20)
           "@ | Out-File -Encoding utf8 "$pkg/README_FORK.txt"
+          "::notice::packaged $((Get-ChildItem $pkg -Recurse | Measure-Object -Property Length -Sum).Sum) bytes"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: alice-vanilla-mp-windows
+          name: alice-vanilla-mp-windows-${{ matrix.compiler }}
           path: package
