@@ -375,10 +375,11 @@ if(WIN32)
 			target_compile_options(AliceCommon INTERFACE
 											${CommonClangWinFlags} -Wno-nontrivial-memcall
 				$<$<CONFIG:Debug>:			/RTC1 /EHsc /MTd /Od>
-				$<$<NOT:$<CONFIG:Debug>>: 	/DNDEBUG /wd4530 /MT /O2 /Oi /sdl- /GS- /Gy /Gw /Zc:inline>)
+				$<$<NOT:$<CONFIG:Debug>>: 	/DNDEBUG /wd4530 /MT /O2 /Oi /sdl- /GS- /Gy /Gw /Zc:inline /clang:-gline-tables-only>)
+			# release builds also get a small PDB (function names + line numbers) so the crash reporter can name the crash site
 			target_link_options(AliceCommon INTERFACE
 				$<$<CONFIG:Debug>: 			/DEBUG:FULL >
-				$<$<NOT:$<CONFIG:Debug>>: 	/OPT:REF /OPT:ICF /LTCG>)
+				$<$<NOT:$<CONFIG:Debug>>: 	/DEBUG:FULL /OPT:REF /OPT:ICF /LTCG>)
 		endif()
 		if(VECTOR_MODE STREQUAL "AVX512")
 			target_compile_options(AliceCommon INTERFACE

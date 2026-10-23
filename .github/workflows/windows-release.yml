@@ -5,8 +5,8 @@ name: Windows release build (vanilla MP fork)
 # saved under all three names the launcher looks for (Alice.exe, AliceSSE.exe, Alice512.exe).
 # That way single player and multiplayer run the same build on every CPU.
 #
-# Two compilers are tried side by side: clang-cl (upgraded to the newest LLVM, closest to what the
-# upstream developers use) and MSVC (what upstream CI builds with). Use one zip for everyone.
+# Built with clang-cl from a pinned LLVM release (closest to what the upstream developers use). A small
+# Alice.pdb ships next to the exe so the built-in crash reporter can name the function and line of a crash.
 
 on:
   workflow_dispatch:
@@ -21,8 +21,6 @@ jobs:
         include:
           - compiler: clang
             preset: x64-release-win-clang-sse
-          - compiler: msvc
-            preset: x64-release-windows-sse
     runs-on: windows-latest
     name: Windows release (${{ matrix.compiler }})
     steps:
@@ -30,10 +28,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Upgrade LLVM to the newest release (clang only)
+      - name: Install pinned LLVM (clang only)
         if: matrix.compiler == 'clang'
         shell: pwsh
-        run: choco upgrade llvm -y --no-progress
+        run: choco install llvm --version=23.1.3 -y --no-progress --force --allow-downgrade
 
       - name: Set up the MSVC environment
         uses: ilammy/msvc-dev-cmd@v1
@@ -43,7 +41,10 @@ jobs:
       - name: Configure
         shell: bash
         run: |
-          if [ "${{ matrix.compiler }}" = "clang" ]; then echo "::notice::$(clang-cl --version | head -1)"; else echo "::notice::$(cl 2>&1 | head -1)"; fi
+          if [ "${{ matrix.compiler }}" = "clang" ]; then
+            v="$(clang-cl --version | head -1)"; echo "::notice::$v"
+            case "$v" in *"version 23."*) ;; *) echo "::error::expected LLVM 23, got: $v"; exit 1;; esac
+          else echo "::notice::$(cl 2>&1 | head -1)"; fi
           cmake --preset=${{ matrix.preset }} -G Ninja
 
       - name: Build
@@ -69,6 +70,8 @@ jobs:
           if (-not $alice -or -not $launcher) { throw "Build outputs not found" }
           foreach ($name in @("Alice.exe", "AliceSSE.exe", "Alice512.exe")) { Copy-Item $alice.FullName "$pkg/$name" }
           Copy-Item $launcher.FullName "$pkg/launch_alice.exe"
+          $pdb = Get-ChildItem $alice.DirectoryName -Filter Alice.pdb | Select-Object -First 1
+          if ($pdb) { Copy-Item $pdb.FullName "$pkg/Alice.pdb" } else { "::warning::Alice.pdb not found; crash reports will not show function names" }
           Copy-Item libs/*.dll $pkg
           Get-ChildItem $alice.DirectoryName -Filter *.dll | Copy-Item -Destination $pkg
           Copy-Item -Recurse assets "$pkg/assets"

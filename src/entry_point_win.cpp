@@ -11,6 +11,11 @@
 
 #include <Windows.h>
 #include <shellapi.h>
+#include <ShlObj.h>
+#include <DbgHelp.h>
+#include <cstdio>
+#include <cstring>
+#include <string>
 #include "Objbase.h"
 #include "window.hpp"
 
@@ -19,6 +24,7 @@
 #pragma comment(lib, "Ole32.lib")
 #pragma comment(lib, "Shell32.lib")
 #pragma comment(lib, "icu.lib")
+#pragma comment(lib, "Dbghelp.lib")
 
 static sys::state game_state; // too big for the stack
 static CRITICAL_SECTION guard_abort_handler;
@@ -62,7 +68,103 @@ void signal_abort_handler(int) {
 	LeaveCriticalSection(&guard_abort_handler);
 }
 
+// Crash reporter: on an unhandled exception, walk the stack with DbgHelp (using Alice.pdb next to the exe when it is
+// there), save the report to Documents\Project Alice\crash_report.txt and show it in a message box so a player can
+// simply screenshot it.
+static void write_crash_report(struct _EXCEPTION_POINTERS* ep) {
+	static char report[12000];
+	size_t len = 0;
+	auto add_line = [&](char const* text) {
+		size_t n = strnlen(text, sizeof(report) - len - 1);
+		std::memcpy(report + len, text, n);
+		len += n;
+		report[len] = 0;
+	};
+	char line[600];
+
+	HANDLE proc = GetCurrentProcess();
+	HANDLE thread = GetCurrentThread();
+	auto exe_base = reinterpret_cast<uint64_t>(GetModuleHandleW(nullptr));
+
+	wchar_t exe_dir[MAX_PATH] = { 0 };
+	GetModuleFileNameW(nullptr, exe_dir, MAX_PATH);
+	if(auto last_slash = wcsrchr(exe_dir, L'\\'); last_slash)
+		*last_slash = 0;
+	SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_FAIL_CRITICAL_ERRORS);
+	BOOL have_symbols = SymInitializeW(proc, exe_dir, TRUE);
+
+	auto code = ep && ep->ExceptionRecord ? uint32_t(ep->ExceptionRecord->ExceptionCode) : 0u;
+	auto address = ep && ep->ExceptionRecord ? reinterpret_cast<uint64_t>(ep->ExceptionRecord->ExceptionAddress) : 0ull;
+	snprintf(line, sizeof(line), "Exception 0x%08X at exe+0x%llX (thread %lu)\n\n", code, (unsigned long long)(address - exe_base), (unsigned long)GetCurrentThreadId());
+	add_line(line);
+
+	if(ep && ep->ContextRecord) {
+		CONTEXT ctx = *ep->ContextRecord;
+		STACKFRAME64 frame;
+		std::memset(&frame, 0, sizeof(frame));
+		frame.AddrPC.Offset = ctx.Rip;
+		frame.AddrPC.Mode = AddrModeFlat;
+		frame.AddrFrame.Offset = ctx.Rbp;
+		frame.AddrFrame.Mode = AddrModeFlat;
+		frame.AddrStack.Offset = ctx.Rsp;
+		frame.AddrStack.Mode = AddrModeFlat;
+
+		static DWORD64 symbol_buffer[(sizeof(SYMBOL_INFO) + 512) / sizeof(DWORD64) + 1];
+		for(int i = 0; i < 24; ++i) {
+			if(!StackWalk64(IMAGE_FILE_MACHINE_AMD64, proc, thread, &frame, &ctx, nullptr, SymFunctionTableAccess64, SymGetModuleBase64, nullptr))
+				break;
+			uint64_t pc = frame.AddrPC.Offset;
+			if(pc == 0)
+				break;
+			char const* fn_name = "?";
+			auto symbol = reinterpret_cast<SYMBOL_INFO*>(symbol_buffer);
+			std::memset(symbol_buffer, 0, sizeof(symbol_buffer));
+			symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+			symbol->MaxNameLen = 511;
+			DWORD64 displacement = 0;
+			if(have_symbols && SymFromAddr(proc, pc, &displacement, symbol))
+				fn_name = symbol->Name;
+			IMAGEHLP_LINE64 src_line;
+			std::memset(&src_line, 0, sizeof(src_line));
+			src_line.SizeOfStruct = sizeof(src_line);
+			DWORD line_displacement = 0;
+			char const* file_name = nullptr;
+			if(have_symbols && SymGetLineFromAddr64(proc, pc, &line_displacement, &src_line) && src_line.FileName) {
+				file_name = src_line.FileName;
+				if(auto src = strstr(file_name, "src\\"); src)
+					file_name = src;
+			}
+			if(file_name)
+				snprintf(line, sizeof(line), "%2d  %s  (%s:%lu)\n", i, fn_name, file_name, (unsigned long)src_line.LineNumber);
+			else
+				snprintf(line, sizeof(line), "%2d  %s  (+0x%llX)\n", i, fn_name, (unsigned long long)(pc - exe_base));
+			add_line(line);
+		}
+	}
+	if(have_symbols)
+		SymCleanup(proc);
+
+	wchar_t* docs = nullptr;
+	if(SHGetKnownFolderPath(FOLDERID_Documents, 0, nullptr, &docs) == S_OK) {
+		std::wstring path = std::wstring(docs) + L"\\Project Alice";
+		CreateDirectoryW(path.c_str(), nullptr);
+		path += L"\\crash_report.txt";
+		HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+		if(f != INVALID_HANDLE_VALUE) {
+			DWORD written = 0;
+			WriteFile(f, report, DWORD(len), &written, nullptr);
+			CloseHandle(f);
+		}
+	}
+	CoTaskMemFree(docs);
+
+	MessageBoxA(nullptr, report, "Project Alice crashed - please screenshot this", MB_OK | MB_ICONERROR | MB_TOPMOST);
+}
+
 LONG WINAPI uef_wrapper(struct _EXCEPTION_POINTERS* lpTopLevelExceptionFilter) {
+	static LONG reported = 0;
+	if(InterlockedExchange(&reported, 1) == 0)
+		write_crash_report(lpTopLevelExceptionFilter);
 	signal_abort_handler(0);
 	return EXCEPTION_CONTINUE_SEARCH;
 }
