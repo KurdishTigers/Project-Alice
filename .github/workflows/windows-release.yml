@@ -27,7 +27,16 @@ jobs:
         run: cmake --preset=x64-release-win-clang-sse -G Ninja
 
       - name: Build
-        run: cmake --build out/build/x64-release-win-clang-sse --parallel --target Alice launch_alice
+        shell: bash
+        run: |
+          set -o pipefail
+          if ! cmake --build out/build/x64-release-win-clang-sse --parallel --target Alice launch_alice 2>&1 | tee build.log; then
+            # surface the first compiler errors as annotations (readable through the API without downloading the log)
+            grep -E "error|FAILED" build.log | grep -v "^\s*$" | head -10 | while IFS= read -r line; do
+              echo "::error::${line:0:900}"
+            done
+            exit 1
+          fi
 
       - name: Package
         shell: pwsh

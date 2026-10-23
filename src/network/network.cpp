@@ -37,6 +37,8 @@ using std::format;
 using fmt::format;
 #endif // ...
 #include <string_view>
+#include <cstdio>
+#include <cstring>
 #include "system_state.hpp"
 #include "commands.hpp"
 #include "SPSCQueue.h"

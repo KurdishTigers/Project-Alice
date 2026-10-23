@@ -1,3 +1,6 @@
+#include <cstdio>
+#include <cstdlib>
+#include <thread>
 #include "commands.hpp"
 #include "demographics.hpp"
 #include "economy_templates.hpp"
@@ -6112,13 +6115,15 @@ void execute_advance_tick(sys::state& state, dcon::nation_id source, sys::checks
 
 	state.single_game_tick();
 
-	// TEST HOOK ONLY: ALICE_TEST_CLIENT_TICK_DELAY_MS makes a client artificially slow, to stand in for a weaker PC when
-	// testing multiplayer pacing. Unset in normal play, so this does nothing.
+#ifndef _WIN32
+	// TEST HOOK ONLY (Linux headless test builds): ALICE_TEST_CLIENT_TICK_DELAY_MS makes a client artificially slow, to
+	// stand in for a weaker PC when testing multiplayer pacing. Unset in normal play, so this does nothing.
 	if(state.network_mode == sys::network_mode_type::client) {
 		static int const test_tick_delay_ms = []() { auto v = std::getenv("ALICE_TEST_CLIENT_TICK_DELAY_MS"); return v ? std::atoi(v) : 0; }();
 		if(test_tick_delay_ms > 0)
 			std::this_thread::sleep_for(std::chrono::milliseconds(test_tick_delay_ms));
 	}
+#endif
 
 	// We check OOS AFTER the tick. That way the oos notification will be sent after without processing a whole other tick. If it was done before, it would process the tick first, then send the oos notification after.
 	// TODO: Maybe add the OOS notification command here directly, and skip the queue so no actions are performed?
