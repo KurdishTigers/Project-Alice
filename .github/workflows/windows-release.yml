@@ -24,7 +24,10 @@ jobs:
           arch: x64
 
       - name: Configure (clang-cl, SSE, release)
-        run: cmake --preset=x64-release-win-clang-sse -G Ninja
+        shell: bash
+        run: |
+          echo "::notice::$(clang-cl --version | head -1)"
+          cmake --preset=x64-release-win-clang-sse -G Ninja
 
       - name: Build
         shell: bash
