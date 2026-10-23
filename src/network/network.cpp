@@ -83,7 +83,7 @@ void port_forwarder::start_forwarding(uint16_t port) {
 
 	internal_wait.lock();
 	started = true;
-	do_forwarding = std::thread{ [&]() {
+	do_forwarding = std::thread{ [this, port]() { // port by value: start_forwarding returns long before the thread is done with it
 		//setup forwarding
 		if(!SUCCEEDED(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED)))
 			return;
